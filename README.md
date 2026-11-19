@@ -148,9 +148,9 @@ python scripts/gsc_auth.py gsc_client.json   # opens a browser once, writes gsc_
 `.github/workflows/radar.yml` runs `sources` every 8 hours and `daily` once a day, checkpoints the complete state in a dedicated private Git repository (see the [setup and migration guide](README.zh-CN.md#actions-状态与初始化)), and writes each report to the run summary. It is off until you opt in:
 
 1. Fork the repository (a private fork is fine).
-2. Remove `config.json` from `.gitignore` and commit your config. It holds no secrets.
-3. Add the secret `AISA_API_KEY`; optionally `RESEND_API_KEY`, `EMAIL_FROM`, `RADAR_EMAIL_TO`, `GSC_TOKEN_JSON`.
-4. Set the repository variable `RADAR_ENABLED` to `true`.
+2. Actions copies the tracked config.example.json to config.json when no config.json is present. Keep credentials in Secrets.
+3. Full mode requires AISA_API_KEY. Set RADAR_AISA_MODE=free to explicitly skip X, judging, new sites and review. Daily skips the legacy sitemap signal in both modes.
+4. Set TOOLIFY_ENABLED=true for Toolify. Dispatch daily on main for a controlled run. Set RADAR_ENABLED=true only when ready for scheduled runs.
 
 ## How the pieces decide
 

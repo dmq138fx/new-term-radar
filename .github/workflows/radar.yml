@@ -6,12 +6,7 @@ name: New-term radar
 #   daily    once a day: everything else, the review of leads from 14 days ago, and the
 #            source leads of the last day.
 #
-# Off until you opt in: set the repository variable RADAR_ENABLED to "true"
-# (Settings > Secrets and variables > Actions > Variables), add the secret AISA_API_KEY,
-# and commit your config.json (remove it from .gitignore first; it holds no secrets).
-# Optional secrets: RESEND_API_KEY, EMAIL_FROM, RADAR_EMAIL_TO (mail the reports),
-# GSC_TOKEN_JSON (the Search Console signal).
-#
+# RADAR_ENABLED gates schedules. Manual dispatch on main is independent.
 on:
   schedule:
     - cron: "0 0,8,16 * * *"   # sources
@@ -33,10 +28,11 @@ permissions:
 
 jobs:
   radar:
-    if: github.ref == 'refs/heads/main' && (vars.RADAR_ENABLED == 'true' || github.event.inputs.command == 'initialize' || github.event.inputs.command == 'initialize-toolify')
+    if: github.ref == 'refs/heads/main' && (vars.RADAR_ENABLED == 'true' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     timeout-minutes: 55
     env:
+      AISA_MODE: ${{ vars.RADAR_AISA_MODE || 'full' }}
       COMMAND: ${{ github.event.inputs.command || (github.event.schedule == '30 1 * * *' && 'daily' || 'sources') }}
     steps:
       - uses: actions/checkout@v4
@@ -58,8 +54,13 @@ jobs:
           ENABLE_TOOLIFY: ${{ vars.TOOLIFY_ENABLED }}
           AISA: ${{ secrets.AISA_API_KEY }}
         run: |
+          if [[ ! -e config.json ]]; then cp config.example.json config.json; fi
           python -m json.tool config.json >/dev/null
-          test -n "$AISA" || [[ "$COMMAND" == initialize* ]]
+          case "$AISA_MODE" in
+            full) test -n "$AISA" || [[ "$COMMAND" == initialize* ]] ;;
+            free) ;;
+            *) echo "::error::RADAR_AISA_MODE must be full or free"; exit 1 ;;
+          esac
           test -n "$STATE_REPO" && test -n "$GH_TOKEN"
           test "$(gh repo view "$STATE_REPO" --json visibility --jq .visibility)" = PRIVATE
           if [[ -n "$BOT" || -n "$CHAT" ]]; then
@@ -94,10 +95,14 @@ jobs:
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
           RADAR_EMAIL_TO: ${{ secrets.RADAR_EMAIL_TO }}
         run: |
+          skip=()
+          if [[ "$AISA_MODE" == free ]]; then skip=(--skip x,judge); fi
           if [ "$COMMAND" = "daily" ]; then
-            python -m radar daily --skip x,hf --out report.md ${RADAR_EMAIL_TO:+--mail}
+            skip=(--skip x,hf,sitemaps)
+            if [[ "$AISA_MODE" == free ]]; then skip=(--skip x,hf,sitemaps,judge,newsites,review); fi
+            python -m radar daily "${skip[@]}" --out report.md ${RADAR_EMAIL_TO:+--mail}
           else
-            python -m radar sources --out report.md ${RADAR_EMAIL_TO:+--mail}
+            python -m radar sources "${skip[@]}" --out report.md ${RADAR_EMAIL_TO:+--mail}
           fi
           if [ -f report.md ]; then cat report.md >> "$GITHUB_STEP_SUMMARY"; fi
 

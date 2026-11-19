@@ -125,9 +125,9 @@ python scripts/gsc_auth.py gsc_client.json   # 打开一次浏览器授权，写
 `.github/workflows/radar.yml` 每 8 小时跑一次 `sources`、每天跑一次 `daily`，状态保存在专用私有 Git 仓库中（配置见下文），报告写到每次运行的摘要页。默认关闭，需要你主动开启：
 
 1. Fork 这个仓库（私有 fork 也可以）。
-2. 把 `config.json` 从 `.gitignore` 里删掉，提交你的配置。配置里没有任何密钥。
-3. 添加 secret `AISA_API_KEY`；可选 `RESEND_API_KEY`、`EMAIL_FROM`、`RADAR_EMAIL_TO`、`GSC_TOKEN_JSON`。
-4. 把仓库变量 `RADAR_ENABLED` 设为 `true`。
+2. Actions 缺少 config.json 时复制版本库中的 config.example.json。凭据放在 Secrets。
+3. 完整模式需要 AISA_API_KEY；显式设置 RADAR_AISA_MODE=free 会跳过 X、模型评分、新站和复盘。两种模式的 daily 都跳过旧 Sitemap。
+4. 设置 TOOLIFY_ENABLED=true 后，从 main 手动运行 daily 即可受控验收。只有准备开启定时任务时才设置 RADAR_ENABLED=true。
 
 ## 各部分怎么判断
 
@@ -171,7 +171,7 @@ product_runs 保存每次抓取时间、结果和完整新增列表。失败保�
 可在配置中设置 toolify.rules（分类名到小写关键词列表的映射，整体替换默认规则）。
 有匹配规则的新增项进入 priority，无匹配项归入 unclassified。
 
-Actions 每日任务可用仓库变量 TOOLIFY_ENABLED=true 启用（同时需要原有 RADAR_ENABLED）。
+Actions 每日任务可用仓库变量 TOOLIFY_ENABLED=true 启用（定时运行还需 RADAR_ENABLED=true）。
 可选 secrets TELEGRAM_BOT_TOKEN 和 TELEGRAM_CHAT_ID 仅用于新增批次的简短摘要。
 
 ### Actions 状态与初始化
