@@ -1,0 +1,54 @@
+name: Verify private state read access
+
+"on": workflow_dispatch
+
+permissions: {}
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Read generation 2 manifest from main
+        env:
+          GH_TOKEN: ${{ secrets.RADAR_STATE_TOKEN }}
+          STATE_REPOSITORY: ${{ vars.RADAR_STATE_REPOSITORY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$STATE_REPOSITORY" != "dmq138fx/new-term-radar-state" || -z "$GH_TOKEN" ]]; then
+            echo "::error::Check the state repository variable and token secret."
+            exit 1
+          fi
+          commit=$(gh api --method GET "repos/$STATE_REPOSITORY/git/ref/heads/main" --jq '.object.sha')
+          [[ "$commit" =~ ^[0-9a-f]{40}$ ]]
+          manifest="$RUNNER_TEMP/manifest.json"
+          gh api --method GET -H 'Accept: application/vnd.github.raw+json' \
+            "repos/$STATE_REPOSITORY/contents/manifest.json?ref=$commit" > "$manifest"
+          python3 - "$manifest" <<'PY'
+          import json
+          import re
+          import sys
+          from datetime import datetime
+          from pathlib import Path
+
+          try:
+              meta = json.loads(Path(sys.argv[1]).read_bytes())
+              snapshots = meta["snapshots"]
+              valid = (
+                  all(type(meta[key]) is int for key in ("version", "generation", "run", "last_success_batch"))
+                  and meta["version"] == 1 and meta["generation"] == 2
+                  and meta["run"] >= 0 and meta["last_success_batch"] >= 0
+                  and datetime.fromisoformat(meta["timestamp"]).utcoffset() is not None
+                  and re.fullmatch(r"[0-9a-f]{64}", meta["sha256"])
+                  and isinstance(snapshots, list)
+                  and all(isinstance(s, str) and s.endswith(".json.gz")
+                          and all(p not in ("", ".", "..") for p in s.split("/")) for s in snapshots)
+                  and len(set(snapshots)) == len(snapshots)
+              )
+          except (KeyError, TypeError, ValueError):
+              valid = False
+          if not valid:
+              sys.exit("Invalid checkpoint manifest or unexpected generation (expected 2).")
+          PY
+          echo "Verified read access to the generation 2 manifest at main commit $commit."
