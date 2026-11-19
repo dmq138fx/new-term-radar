@@ -5,11 +5,20 @@ from datetime import datetime, timezone, timedelta
 import gzip
 import hashlib
 import json
+import os
 from pathlib import Path
 import sqlite3
 import subprocess
 from tempfile import TemporaryDirectory
 from zipfile import ZipFile, ZIP_DEFLATED
+
+
+def actions_checkpoint_run():
+    """Checkpoint runs 0 and 1 were consumed by the manual migration and baseline."""
+    number = int(os.environ["GITHUB_RUN_NUMBER"])
+    if number < 1:
+        raise ValueError("invalid Actions run number")
+    return number + 1
 
 
 def git(repo, *args):
@@ -110,8 +119,10 @@ if __name__ == "__main__":
     parser.add_argument("operation", choices=["restore", "initialize", "publish"])
     parser.add_argument("--repo", type=Path, default=Path("authority"))
     parser.add_argument("--state", type=Path, default=Path("state"))
-    parser.add_argument("--run", type=int, required=True)
+    parser.add_argument("--run", type=int, help="explicit local checkpoint number; defaults to Actions run number + 1")
     args = parser.parse_args()
+    if args.run is None:
+        args.run = actions_checkpoint_run()
     if args.operation == "publish":
         publish(args.repo, args.state, args.run)
     else:

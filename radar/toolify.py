@@ -185,7 +185,7 @@ def main():
             token, chat = os.environ["TELEGRAM_BOT_TOKEN"], os.environ["TELEGRAM_CHAT_ID"]
             def save():
                 if args.authority:
-                    checkpoint.publish(args.authority, args.state, int(os.environ["GITHUB_RUN_NUMBER"]))
+                    checkpoint.publish(args.authority, args.state, checkpoint.actions_checkpoint_run())
             outbox.deliver(db, token, chat, save, urlopen)
             return 0
         result = scan(db, settings.get("rules", RULES), initialize=args.initialize,

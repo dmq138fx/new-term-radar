@@ -115,3 +115,21 @@ def test_claim_must_be_published_before_send():
         raise RuntimeError("push rejected")
     with pytest.raises(RuntimeError, match="push rejected"):
         outbox.deliver(db, "mock", "mock", failed_publish, lambda *a, **kw: pytest.fail("premature send"))
+
+
+def test_first_actions_run_after_manual_baseline(tmp_path, monkeypatch):
+    repo = local_remote(tmp_path)
+    baseline = tmp_path / "manual"
+    c.restore(repo, baseline, 1, initialize=True)
+    sqlite3.connect(baseline / "radar.db").close()
+    c.publish(repo, baseline, 1)
+    monkeypatch.setenv("GITHUB_RUN_NUMBER", "1")
+    number = c.actions_checkpoint_run()
+    assert number == 2
+    runner = tmp_path / "runner"
+    c.restore(repo, runner, number)
+    c.publish(repo, runner, number)
+    with pytest.raises(ValueError, match="stale"):
+        c.restore(repo, tmp_path / "retry", number)
+    monkeypatch.setenv("GITHUB_RUN_NUMBER", "2")
+    c.restore(repo, tmp_path / "next", c.actions_checkpoint_run())

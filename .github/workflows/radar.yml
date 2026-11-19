@@ -81,7 +81,7 @@ jobs:
         run: |
           operation=restore
           if [[ "$COMMAND" == initialize ]]; then operation=initialize; fi
-          python -m radar.checkpoint "$operation" --run "$GITHUB_RUN_NUMBER"
+          python -m radar.checkpoint "$operation"
 
       - name: Run the radar
         if: env.COMMAND == 'sources' || env.COMMAND == 'daily'
@@ -115,7 +115,7 @@ jobs:
 
       - name: Publish verified state
         timeout-minutes: 5
-        run: python -m radar.checkpoint publish --run "$GITHUB_RUN_NUMBER"
+        run: python -m radar.checkpoint publish
 
       - name: Deliver queued summaries
         timeout-minutes: 8
