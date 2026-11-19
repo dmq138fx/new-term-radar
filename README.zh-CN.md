@@ -122,12 +122,12 @@ python scripts/gsc_auth.py gsc_client.json   # 打开一次浏览器授权，写
 
 ## 在 GitHub Actions 上跑
 
-`.github/workflows/radar.yml` 每 8 小时跑一次 `sources`、每天跑一次 `daily`，状态存在 Actions 缓存里，报告写到每次运行的摘要页。默认关闭，需要你主动开启：
+`.github/workflows/radar.yml` 每 8 小时跑一次 `sources`、每天跑一次 `daily`，状态保存在专用私有 Git 仓库中（配置见下文），报告写到每次运行的摘要页。默认关闭，需要你主动开启：
 
 1. Fork 这个仓库（私有 fork 也可以）。
-2. 把 `config.json` 从 `.gitignore` 里删掉，提交你的配置。配置里没有任何密钥。
-3. 添加 secret `AISA_API_KEY`；可选 `RESEND_API_KEY`、`EMAIL_FROM`、`RADAR_EMAIL_TO`、`GSC_TOKEN_JSON`。
-4. 把仓库变量 `RADAR_ENABLED` 设为 `true`。
+2. Actions 缺少 config.json 时复制版本库中的 config.example.json。凭据放在 Secrets。
+3. 完整模式需要 AISA_API_KEY；显式设置 RADAR_AISA_MODE=free 会跳过 X、模型评分、新站和复盘。两种模式的 daily 都跳过旧 Sitemap。
+4. 设置 TOOLIFY_ENABLED=true 后，从 main 手动运行 daily 即可受控验收。只有准备开启定时任务时才设置 RADAR_ENABLED=true。
 
 ## 各部分怎么判断
 
@@ -160,3 +160,40 @@ python -m pytest -q tests
 ## 许可
 
 MIT。这套雷达提取自 [agentskillshub.top](https://agentskillshub.top) 背后每天在跑的版本。
+
+### Toolify 新产品发现
+
+在仓库根目录运行 `python -m radar.toolify --config config.example.json --state state --out toolify.json`。
+本地新安装首次运行需加 `--initialize`，首次仅建立基线。完整抓取成功后，独立的 SQLite 表 products 保存产品状态；
+product_runs 保存每次抓取时间、结果和完整新增列表。失败保留基线。
+已知产品重新出现时恢复 present，不重复作为首次发现。分片缺失、单片产品数下降超过 20% 或全站唯一产品数变化超过 30% 时拒绝更新，详情见输出 JSON。可在 toolify 配置中覆盖 max_shard_drop 和 max_total_change（比例）。
+分类按 slug 中的完整词匹配，所有结果均为 slug_inferred。
+可在配置中设置 toolify.rules（分类名到小写关键词列表的映射，整体替换默认规则）。
+有匹配规则的新增项进入 priority，无匹配项归入 unclassified。
+
+Actions 每日任务可用仓库变量 TOOLIFY_ENABLED=true 启用（定时运行还需 RADAR_ENABLED=true）。
+可选 secrets TELEGRAM_BOT_TOKEN 和 TELEGRAM_CHAT_ID 仅用于新增批次的简短摘要。
+
+### Actions 状态与初始化
+
+1. 准备专用私有 GitHub 仓库，在 main 建立初始提交，其中包含空文件 ALLOW_INITIALIZE。
+   限制 main 的写入者，禁止强推和删除，允许自动化账户正常快进提交。
+2. 创建仅限该私有仓库的 fine-grained PAT，授予 Contents 读写及默认 Metadata 读取权限。
+   在雷达代码仓库添加变量 RADAR_STATE_REPOSITORY（owner/name）和 Secret RADAR_STATE_TOKEN。
+   准备不含凭据的 config.json 和常规运行所需 AISA_API_KEY。Telegram 两个 Secret 同时设置或同时留空。
+3. 全新安装可先保持 RADAR_ENABLED 关闭。合并后从 main 手动 dispatch 一次 initialize；
+   如果要同时建立产品基线，先设 TOOLIFY_ENABLED=true。已初始化的状态仓库拒绝重复初始化。
+   之后才启用 RADAR_ENABLED。若后来才开启 Toolify，先手动 initialize-toolify。
+4. **已有历史**：先暂停旧任务并取得可信的完整 state/（含 radar.db 和旧 Sitemap 的 gzip JSON）。
+   在本地克隆私有状态仓库到 authority/，以空的临时目标执行
+   `python -m radar.checkpoint initialize --state staging --run 0`，
+   将可信 state/ 内容复制到 staging/，保留新生成的 .checkpoint，再执行
+   `python -m radar.checkpoint publish --state staging --run 0`。不要对历史安装使用空库初始化。
+   缺少可信完整历史时保持停用。旧 Toolify 数据首次迁移分片元数据使用 initialize-toolify。
+5. 每代包含全量 SQLite 在线备份、旧快照、校验清单及时间戳。以 Git 快进提交保存历史，
+   从最新提交恢复。超过七天、格式或校验不符会停止；先人工核验历史和差异，不要删除清单重建。
+   仓库增长取决于压缩包大小和频率，需监测私有仓库容量，必要时迁往对象存储。
+   保护状态仓库凭据，并独立备份。历史版本可从此前的 Git 提交检出到隔离目录核验。
+6. 发送前后分别持久化 Outbox。明确拒绝保留 pending；超时或发送中断保留 uncertain。
+   用 batch_id 对照聊天记录后人工处理 uncertain；已发送记录保存 message_id。
+   导出报告从 Actions Artifact 获取；权威状态来自私有仓库。
