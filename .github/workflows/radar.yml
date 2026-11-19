@@ -57,11 +57,15 @@ jobs:
           if [[ ! -e config.json ]]; then cp config.example.json config.json; fi
           python -m json.tool config.json >/dev/null
           case "$AISA_MODE" in
-            full) test -n "$AISA" || [[ "$COMMAND" == initialize* ]] ;;
+            full)
+              if [[ -z "$AISA" && "$COMMAND" != initialize* ]]; then
+                echo "::error::Full mode requires AISA_API_KEY"
+                exit 1
+              fi ;;
             free) ;;
             *) echo "::error::RADAR_AISA_MODE must be full or free"; exit 1 ;;
           esac
-          test -n "$STATE_REPO" && test -n "$GH_TOKEN"
+          [[ -n "$STATE_REPO" && -n "$GH_TOKEN" ]] || exit 1
           test "$(gh repo view "$STATE_REPO" --json visibility --jq .visibility)" = PRIVATE
           if [[ -n "$BOT" || -n "$CHAT" ]]; then
             test -n "$BOT" && test -n "$CHAT" || exit 1
