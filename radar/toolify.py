@@ -10,11 +10,11 @@ from pathlib import Path
 import re
 import sqlite3
 import time
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import urlsplit
 from urllib.request import urlopen
 import xml.etree.ElementTree as ET
 
-from . import sitemaps
+from . import checkpoint, outbox, sitemaps
 
 HOST = "https://www.toolify.ai"
 NS = "{http://www.sitemaps.org/schemas/sitemap/0.9}"
@@ -29,8 +29,15 @@ RULES = {
 }
 
 
-def entries(url, root, child):
-    tree = ET.fromstring(sitemaps.fetch(url, attempts=1, strict=True))
+def entries(url, root, child, metrics):
+    start = time.monotonic()
+    metrics[url] = {"bytes": None}
+    try:
+        body = sitemaps.fetch(url, attempts=1, strict=True)
+    finally:
+        metrics[url]["seconds"] = time.monotonic() - start
+    metrics[url]["bytes"] = len(body.encode()) if isinstance(body, str) else len(body)
+    tree = ET.fromstring(body)
     if tree.tag != NS + root or not len(tree):
         raise ValueError(f"invalid {root}: {url}")
     for entry in tree:
@@ -40,16 +47,16 @@ def entries(url, root, child):
         yield loc, entry.findtext(NS + "lastmod")
 
 
-def crawl():
-    shards = sorted({url for url, _ in entries(HOST + "/sitemap.xml", "sitemapindex", "sitemap")
+def crawl(metrics):
+    shards = sorted({url for url, _ in entries(HOST + "/sitemap.xml", "sitemapindex", "sitemap", metrics)
                      if re.fullmatch(re.escape(HOST) + r"/sitemap_tools_[0-9]+\.xml", url)})
     if not shards:
         raise ValueError("no product shards")
     products = {}
     for shard in shards:
         time.sleep(5)
-        defaults = 0
-        for url, modified in entries(shard, "urlset", "url"):
+        defaults = set()
+        for url, modified in entries(shard, "urlset", "url", metrics):
             parts = urlsplit(url)
             match = re.fullmatch(r"/(?:(zh|tw|ko|ja|pt|es|de|fr|vi)/)?tool/([^/\s]+)/?", parts.path)
             if parts.scheme != "https" or parts.netloc != "www.toolify.ai" or not match:
@@ -59,7 +66,8 @@ def crawl():
                 raise ValueError(f"invalid product slug in {shard}")
             if not locale:
                 products[HOST + "/tool/" + slug] = modified
-                defaults += 1
+                defaults.add(slug)
+        metrics[shard]["products"] = len(defaults)
         if not defaults:
             raise ValueError(f"no default products in {shard}")
     return products
@@ -71,7 +79,22 @@ def classify(slug, rules):
             if tokens.intersection(words)}
 
 
-def scan(db, rules):
+def validate_counts(old, current, total, settings):
+    missing = old["shards"].keys() - current.keys()
+    if missing:
+        raise ValueError(f"missing shards: {sorted(missing)}")
+    drop = float(settings.get("max_shard_drop", 0.2))
+    change = float(settings.get("max_total_change", 0.3))
+    if not 0 <= drop <= 1 or not 0 <= change:
+        raise ValueError("invalid integrity thresholds")
+    for shard, count in old["shards"].items():
+        if current[shard] < count * (1-drop):
+            raise ValueError(f"shrinking shard: {shard}")
+    if abs(total-old["total"]) > old["total"] * change:
+        raise ValueError("abnormal total product count")
+
+
+def scan(db, rules, *, initialize=False, settings=None, notify=False):
     db.executescript("""
     CREATE TABLE IF NOT EXISTS products (
         source TEXT, source_product_url TEXT, slug TEXT, first_seen_at TEXT, last_seen_at TEXT,
@@ -80,16 +103,36 @@ def scan(db, rules):
     CREATE TABLE IF NOT EXISTS product_runs (
         id INTEGER PRIMARY KEY, source TEXT, fetched_at TEXT, result TEXT);
     """)
+    db.execute(outbox.SCHEMA)
+    start = time.monotonic()
     now = datetime.now(timezone.utc).isoformat()
     result = dict(fetched_at=now, source="toolify", status="success", new=[], disappeared=[],
                   category_counts={}, priority=[])
+    last = db.execute("""SELECT id,result FROM product_runs WHERE source='toolify'
+        AND json_extract(result,'$.status')='success' ORDER BY id DESC LIMIT 1""").fetchone()
+    metrics = result["requests"] = {}
+    try:
+        if not last and not initialize:
+            raise ValueError("explicit Toolify initialization required")
+        current = crawl(metrics)
+        shards = {url: m["products"] for url, m in metrics.items() if "products" in m}
+        result.update(shards=shards, total=len(current))
+        if last:
+            old = json.loads(last[1])
+            result["previous_success_at"] = old["fetched_at"]
+            if "shards" in old:
+                validate_counts(old, shards, len(current), settings or {})
+            elif not initialize:
+                raise ValueError("explicit migration required for legacy shard metadata")
+    except (OSError, HTTPException, ValueError, ET.ParseError) as exc:
+        result.update(status="failed", error=str(exc))
     with db:
         db.execute("BEGIN IMMEDIATE")
-        try:
-            current = crawl()
-        except (OSError, HTTPException, ValueError, ET.ParseError) as exc:
-            result.update(status="failed", error=str(exc))
-        else:
+        latest = db.execute("""SELECT max(id) FROM product_runs WHERE source='toolify'
+            AND json_extract(result,'$.status')='success'""").fetchone()[0]
+        if latest != (last[0] if last else None):
+            result.update(status="failed", error="superseded scan")
+        if result["status"] == "success":
             previous = dict(db.execute("SELECT source_product_url, discovery_status FROM products WHERE source='toolify'"))
             result["baseline"] = not previous
             counts = Counter()
@@ -115,8 +158,13 @@ def scan(db, rules):
             db.executemany("UPDATE products SET discovery_status='missing' WHERE source='toolify' AND source_product_url=?",
                            [(url,) for url in result["disappeared"]])
         result["new_count"] = len(result["new"])
-        db.execute("INSERT INTO product_runs(source,fetched_at,result) VALUES ('toolify',?,?)",
+        result["seconds"] = time.monotonic()-start
+        cursor = db.execute("INSERT INTO product_runs(source,fetched_at,result) VALUES ('toolify',?,?)",
                    (now, json.dumps(result, ensure_ascii=False)))
+        if notify and result["new_count"]:
+            batch = f"toolify-{cursor.lastrowid}"
+            summary = f"{batch} | new {result['new_count']} | missing {len(result['disappeared'])}"
+            db.execute("INSERT INTO telegram_outbox(batch_id,summary) VALUES (?,?)", (batch, summary))
     return result
 
 
@@ -125,23 +173,25 @@ def main():
     parser.add_argument("--state", type=Path, default=Path("state"))
     parser.add_argument("--config", type=Path, default=Path("config.example.json"))
     parser.add_argument("--out", type=Path, default=Path("toolify.json"))
+    parser.add_argument("--initialize", action="store_true")
+    parser.add_argument("--queue", action="store_true")
+    parser.add_argument("--deliver", action="store_true")
+    parser.add_argument("--authority", type=Path)
     args = parser.parse_args()
     settings = json.loads(args.config.read_text()).get("toolify", {})
     args.state.mkdir(parents=True, exist_ok=True)
     with closing(sqlite3.connect(args.state / "radar.db", timeout=180)) as db:
-        result = scan(db, settings.get("rules", RULES))
+        if args.deliver:
+            token, chat = os.environ["TELEGRAM_BOT_TOKEN"], os.environ["TELEGRAM_CHAT_ID"]
+            def save():
+                if args.authority:
+                    checkpoint.publish(args.authority, args.state, int(os.environ["GITHUB_RUN_NUMBER"]))
+            outbox.deliver(db, token, chat, save, urlopen)
+            return 0
+        result = scan(db, settings.get("rules", RULES), initialize=args.initialize,
+                      settings=settings, notify=args.queue)
     args.out.write_text(json.dumps(result, ensure_ascii=False, indent=2))
-    summary = f"Toolify {result['status']} | new {result['new_count']} | missing {len(result['disappeared'])}"
-    print(summary)
-    token, chat = os.getenv("TELEGRAM_BOT_TOKEN"), os.getenv("TELEGRAM_CHAT_ID")
-    if result["new"] and token and chat:
-        data = urlencode(dict(chat_id=chat, text=summary)).encode()
-        try:
-            with urlopen(f"https://api.telegram.org/bot{token}/sendMessage", data=data, timeout=15) as response:
-                if not json.load(response).get("ok"):
-                    raise ValueError("sendMessage failed")
-        except (OSError, ValueError):
-            raise SystemExit("Telegram delivery unconfirmed; batch retained in product_runs")
+    print(f"Toolify {result['status']} | new {result['new_count']} | {result.get('error', '')}")
     return int(result["status"] == "failed")
 
 

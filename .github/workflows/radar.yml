@@ -12,12 +12,6 @@ name: New-term radar
 # Optional secrets: RESEND_API_KEY, EMAIL_FROM, RADAR_EMAIL_TO (mail the reports),
 # GSC_TOKEN_JSON (the Search Console signal).
 #
-# State (state/radar.db and the snapshots) lives in the Actions cache: one entry per
-# run, restored by prefix, so the repository does not grow. A missing cache only means
-# the next run builds new snapshots and reports nothing that day; the leads database
-# would start over, so download the "radar-state" artifact now and then if you care
-# about the review's history.
-
 on:
   schedule:
     - cron: "0 0,8,16 * * *"   # sources
@@ -25,7 +19,9 @@ on:
   workflow_dispatch:
     inputs:
       command:
-        description: "daily or sources"
+        type: choice
+        options: [daily, sources, initialize, initialize-toolify]
+        description: "Initialization is manual only"
         default: "daily"
 
 concurrency:
@@ -37,13 +33,15 @@ permissions:
 
 jobs:
   radar:
-    if: vars.RADAR_ENABLED == 'true'
+    if: github.ref == 'refs/heads/main' && (vars.RADAR_ENABLED == 'true' || github.event.inputs.command == 'initialize' || github.event.inputs.command == 'initialize-toolify')
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 55
     env:
       COMMAND: ${{ github.event.inputs.command || (github.event.schedule == '30 1 * * *' && 'daily' || 'sources') }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -51,14 +49,43 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      - name: Restore the state
-        uses: actions/cache/restore@v4
+      - name: Validate configuration
+        env:
+          GH_TOKEN: ${{ secrets.RADAR_STATE_TOKEN }}
+          STATE_REPO: ${{ vars.RADAR_STATE_REPOSITORY }}
+          BOT: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+          ENABLE_TOOLIFY: ${{ vars.TOOLIFY_ENABLED }}
+          AISA: ${{ secrets.AISA_API_KEY }}
+        run: |
+          python -m json.tool config.json >/dev/null
+          test -n "$AISA" || [[ "$COMMAND" == initialize* ]]
+          test -n "$STATE_REPO" && test -n "$GH_TOKEN"
+          test "$(gh repo view "$STATE_REPO" --json visibility --jq .visibility)" = PRIVATE
+          if [[ -n "$BOT" || -n "$CHAT" ]]; then
+            test -n "$BOT" && test -n "$CHAT" || exit 1
+            echo "QUEUE=--queue" >> "$GITHUB_ENV"
+          fi
+          if [[ "$COMMAND" == initialize-toolify ]]; then test "$ENABLE_TOOLIFY" = true; fi
+
+      - uses: actions/checkout@v4
         with:
-          path: state
-          key: radar-state-${{ github.run_id }}
-          restore-keys: radar-state-
+          repository: ${{ vars.RADAR_STATE_REPOSITORY }}
+          token: ${{ secrets.RADAR_STATE_TOKEN }}
+          ref: main
+          path: authority
+          fetch-depth: 0
+          filter: blob:none
+
+      - name: Restore verified state
+        run: |
+          operation=restore
+          if [[ "$COMMAND" == initialize ]]; then operation=initialize; fi
+          python -m radar.checkpoint "$operation" --run "$GITHUB_RUN_NUMBER"
 
       - name: Run the radar
+        if: env.COMMAND == 'sources' || env.COMMAND == 'daily'
+        timeout-minutes: 22
         env:
           AISA_API_KEY: ${{ secrets.AISA_API_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
@@ -75,28 +102,37 @@ jobs:
           if [ -f report.md ]; then cat report.md >> "$GITHUB_STEP_SUMMARY"; fi
 
       - name: Discover Toolify products
-        if: always() && env.COMMAND == 'daily' && vars.TOOLIFY_ENABLED == 'true'
+        if: env.COMMAND != 'sources' && vars.TOOLIFY_ENABLED == 'true'
+        timeout-minutes: 15
+        run: |
+          init=""
+          if [[ "$COMMAND" == initialize* ]]; then init=--initialize; fi
+          python -m radar.toolify --config config.json $init ${QUEUE:-}
+
+      - name: Initialize empty radar database
+        if: env.COMMAND == 'initialize' && vars.TOOLIFY_ENABLED != 'true'
+        run: python -c "from radar.store import connect; from pathlib import Path; connect(Path('state')).close()"
+
+      - name: Publish verified state
+        timeout-minutes: 5
+        run: python -m radar.checkpoint publish --run "$GITHUB_RUN_NUMBER"
+
+      - name: Deliver queued summaries
+        timeout-minutes: 8
+        if: env.COMMAND == 'daily' && vars.TOOLIFY_ENABLED == 'true' && env.QUEUE == '--queue'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python -m radar.toolify --config config.json
+        run: python -m radar.toolify --config config.json --deliver --authority authority
 
-      - name: Save the state
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: state
-          key: radar-state-${{ github.run_id }}
-
-      - name: Keep the report and the state
+      - name: Keep diagnostic reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: radar-${{ env.COMMAND }}-${{ github.run_id }}
+          name: radar-${{ env.COMMAND }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             report.md
             report.json
             toolify.json
-            state/radar.db
           if-no-files-found: ignore
           retention-days: 30

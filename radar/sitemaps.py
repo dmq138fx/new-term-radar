@@ -38,11 +38,17 @@ _LOCALE = r"^(https?://[^/]+)/[a-z]{2}(?:-[A-Za-z]{2,4})?(?=/)"
 _LOC = re.compile(r"<loc>\s*([^<\s]+)\s*</loc>")
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def fetch(url: str, *, attempts: int = RETRIES, strict: bool = False) -> str:
     req = urllib.request.Request(url.replace("&amp;", "&"), headers={"User-Agent": UA})
     for attempt in range(attempts):
         try:
-            with urllib.request.urlopen(req, timeout=TIMEOUT) as res:
+            opener = urllib.request.build_opener(_NoRedirect()).open if strict else urllib.request.urlopen
+            with opener(req, timeout=TIMEOUT) as res:
                 if strict and (res.status != 200 or res.geturl() != url):
                     raise ValueError("unexpected sitemap response")
                 body = res.read()

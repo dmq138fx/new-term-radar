@@ -43,19 +43,22 @@ def test_lifecycle(site, tmp_path, monkeypatch):
     setup, _ = site
     setup({ONE: ["/tool/base", "/zh/tool/base", "/tool/base/?ref=x"]})
     cfg = tmp_path / "config.json"
-    cfg.write_text("{}")
+    cfg.write_text('{"toolify":{"max_total_change":20}}')
     out = tmp_path / "out.json"
-    monkeypatch.setattr(sys, "argv", ["toolify", "--config", str(cfg), "--state", str(tmp_path), "--out", str(out)])
+    monkeypatch.setattr(sys, "argv", ["toolify", "--config", str(cfg), "--state", str(tmp_path), "--out", str(out), "--initialize", "--queue"])
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "mock")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "mock")
     from io import BytesIO
     sent = []
     def send(url, data, timeout):
         sent.append(data)
-        return BytesIO(b'{"ok":true}')
+        return BytesIO(b'{"ok":true,"result":{"message_id":4}}')
     monkeypatch.setattr(t, "urlopen", send)
     def run():
         assert t.main() == 0
+        with monkeypatch.context() as delivery:
+            delivery.setattr(sys, "argv", sys.argv + ["--deliver"])
+            assert t.main() == 0
         return json.loads(out.read_text())
     assert run()["baseline"] and not sent
     paths = ["/tool/pdf-converter"] + [f"/tool/brand-{n}" for n in range(10)]
@@ -66,7 +69,8 @@ def test_lifecycle(site, tmp_path, monkeypatch):
     assert result["new"][-1]["matches"] == {"files_data": ["pdf"], "utility": ["converter"]}
     assert run()["new"] == [] and len(sent) == 1
     setup({TWO: paths})
-    assert run()["disappeared"] == [t.HOST + "/tool/base"]
+    assert t.main() == 1
+    assert "missing shards" in json.loads(out.read_text())["error"]
     with sqlite3.connect(tmp_path / "radar.db") as db:
         assert db.execute("SELECT count(*) FROM products").fetchone() == (12,)
 
@@ -77,7 +81,7 @@ def test_bad_final_shard_preserves_baseline(site, broken):
     setup, pages = site
     db = sqlite3.connect(":memory:")
     setup({ONE: ["/tool/old"]})
-    t.scan(db, t.RULES)
+    t.scan(db, t.RULES, initialize=True)
     before = db.execute("SELECT * FROM products").fetchall()
     setup({ONE: ["/tool/new"], TWO: ["/tool/another"]})
     pages[TWO] = broken

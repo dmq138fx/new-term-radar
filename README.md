@@ -145,7 +145,7 @@ python scripts/gsc_auth.py gsc_client.json   # opens a browser once, writes gsc_
 
 ## Run it on GitHub Actions
 
-`.github/workflows/radar.yml` runs `sources` every 8 hours and `daily` once a day, keeps the state in the Actions cache, and writes each report to the run summary. It is off until you opt in:
+`.github/workflows/radar.yml` runs `sources` every 8 hours and `daily` once a day, checkpoints the complete state in a dedicated private Git repository (see the [setup and migration guide](README.zh-CN.md#actions-状态与初始化)), and writes each report to the run summary. It is off until you opt in:
 
 1. Fork the repository (a private fork is fine).
 2. Remove `config.json` from `.gitignore` and commit your config. It holds no secrets.
