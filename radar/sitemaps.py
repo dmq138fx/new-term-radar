@@ -38,15 +38,17 @@ _LOCALE = r"^(https?://[^/]+)/[a-z]{2}(?:-[A-Za-z]{2,4})?(?=/)"
 _LOC = re.compile(r"<loc>\s*([^<\s]+)\s*</loc>")
 
 
-def fetch(url: str) -> str:
+def fetch(url: str, *, attempts: int = RETRIES, strict: bool = False) -> str:
     req = urllib.request.Request(url.replace("&amp;", "&"), headers={"User-Agent": UA})
-    for attempt in range(RETRIES):
+    for attempt in range(attempts):
         try:
             with urllib.request.urlopen(req, timeout=TIMEOUT) as res:
+                if strict and (res.status != 200 or res.geturl() != url):
+                    raise ValueError("unexpected sitemap response")
                 body = res.read()
             return (gzip.decompress(body) if body[:2] == b"\x1f\x8b" else body).decode("utf-8", "replace")
         except (OSError, ValueError):
-            if attempt == RETRIES - 1:
+            if attempt == attempts - 1:
                 raise
             time.sleep(RETRY_PAUSE * (attempt + 1))
     return ""

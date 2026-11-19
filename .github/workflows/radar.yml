@@ -74,6 +74,13 @@ jobs:
           fi
           if [ -f report.md ]; then cat report.md >> "$GITHUB_STEP_SUMMARY"; fi
 
+      - name: Discover Toolify products
+        if: always() && env.COMMAND == 'daily' && vars.TOOLIFY_ENABLED == 'true'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python -m radar.toolify --config config.json
+
       - name: Save the state
         if: always()
         uses: actions/cache/save@v4
@@ -89,6 +96,7 @@ jobs:
           path: |
             report.md
             report.json
+            toolify.json
             state/radar.db
           if-no-files-found: ignore
           retention-days: 30

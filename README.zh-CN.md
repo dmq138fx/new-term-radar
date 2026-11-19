@@ -160,3 +160,18 @@ python -m pytest -q tests
 ## 许可
 
 MIT。这套雷达提取自 [agentskillshub.top](https://agentskillshub.top) 背后每天在跑的版本。
+
+### Toolify 新产品发现
+
+在仓库根目录运行 `python -m radar.toolify --config config.example.json --state state --out toolify.json`。
+首轮仅建立基线。完整抓取成功后，独立的 SQLite 表 products 保存产品状态；
+product_runs 保存每次抓取时间、结果和完整新增列表。失败保留基线。
+已知产品重新出现时恢复 present，不重复作为首次发现。分片从索引移除时按剩余分片的并集计算消失。
+分类按 slug 中的完整词匹配，所有结果均为 slug_inferred。
+可在配置中设置 toolify.rules（分类名到小写关键词列表的映射，整体替换默认规则）。
+有匹配规则的新增项进入 priority，无匹配项归入 unclassified。
+
+Actions 每日任务可用仓库变量 TOOLIFY_ENABLED=true 启用（同时需要原有 RADAR_ENABLED）。
+可选 secrets TELEGRAM_BOT_TOKEN 和 TELEGRAM_CHAT_ID 仅用于新增批次的简短摘要。
+基线与报告随现有 state 缓存和 artifact 保存。下载 artifact 备份 radar.db；
+恢复旧数据库可能重新发现旧批次。发送前先提交发现记录，消息投递不确定时不自动重发。
